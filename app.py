@@ -46,21 +46,18 @@ def separate_audio():
         logging.info(f"الملف '{filename}' تم حفظه بنجاح.")
 
         # --- استخدام Demucs لفصل الصوت ---
-        # سيقوم Demucs بإنشاء مجلد داخل PROCESSED_FOLDER
         model_name = "htdemucs" # اسم النموذج المستخدم
         output_dir = app.config['PROCESSED_FOLDER']
         
         logging.info(f"بدء عملية الفصل باستخدام Demucs للملف: {input_path}")
-        # نستخدم subprocess لتشغيل Demucs لتجنب مشاكل الذاكرة
         command = [
             "python3", "-m", "demucs.separate",
             "-n", model_name,
             "-o", str(output_dir),
-            "--two-stems=vocals", # لإنتاج مسار للمغني ومسار للموسيقى
+            "--two-stems=vocals",
             str(input_path)
         ]
         
-        # تحديد الجهاز (CPU) لأن Cloud Run لا يحتوي على GPU
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -73,11 +70,10 @@ def separate_audio():
         logging.info("اكتملت عملية الفصل بنجاح.")
 
         base_filename = os.path.splitext(filename)[0]
-        # المسار الذي ينشئه Demucs
         result_folder = os.path.join(output_dir, model_name, base_filename)
         
         vocals_path = os.path.join(result_folder, 'vocals.wav')
-        accompaniment_path = os.path.join(result_folder, 'no_vocals.wav') # Demucs يسميه no_vocals
+        accompaniment_path = os.path.join(result_folder, 'no_vocals.wav')
 
         if not os.path.exists(vocals_path) or not os.path.exists(accompaniment_path):
             raise Exception("لم يتم العثور على الملفات الناتجة.")
@@ -109,13 +105,11 @@ def enhance_audio():
         file.save(input_path)
         logging.info(f"الملف '{filename}' تم حفظه بنجاح للتحسين.")
         
-        # تحويل الملف إلى صيغة WAV للمعالجة
         wav_filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_for_enhance.wav')
         subprocess.run(['ffmpeg', '-i', input_path, wav_filepath, '-y'], check=True)
         
         rate, data = wavfile.read(wav_filepath)
         
-        # إزالة الضوضاء
         logging.info("بدء عملية إزالة الضوضاء...")
         reduced_noise_data = nr.reduce_noise(y=data, sr=rate, stationary=True)
         logging.info("اكتملت إزالة الضوضاء.")
@@ -124,4 +118,20 @@ def enhance_audio():
         output_filepath = os.path.join(app.config['PROCESSED_FOLDER'], output_filename)
         wavfile.write(output_filepath, rate, reduced_noise_data)
         
-  
+        return jsonify({
+            "files": {"enhanced": f"/processed/{output_filename}"}
+        })
+        
+    except Exception as e:
+        logging.error(f"حدث خطأ أثناء التحسين: {e}")
+        return jsonify({"error": f"حدث خطأ أثناء المعالجة: {str(e)}"}), 500
+
+
+@app.route('/processed/<path:path>')
+def send_processed_file(path):
+    return send_from_directory(app.config['PROCESSED_FOLDER'], path, as_attachment=True)
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
