@@ -219,3 +219,6 @@ footer {
     color: var(--text-muted-color);
     font-size: 0.9rem;
 }
+.hidden {
+    display: none;
+}
