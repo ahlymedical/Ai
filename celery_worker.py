@@ -2,30 +2,40 @@ import os
 import subprocess
 import logging
 from celery import Celery
-from google.cloud import storage
+from google.cloud import storage, secretmanager
 import firebase_admin
 from firebase_admin import credentials, firestore
 import noisereduce as nr
 from scipy.io import wavfile
 import tempfile
+import json
 
 # --- الإعدادات الأساسية ---
 logging.basicConfig(level=logging.INFO)
 
+# --- جلب الإعدادات الحساسة ---
+project_id = os.environ.get('GCP_PROJECT')
+
+def get_secret(secret_id, version_id="latest"):
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
+    response = client.access_secret_version(request={"name": name})
+    return response.payload.data.decode("UTF-8")
+
 # --- إعداد Celery ---
-# استبدل REDIS_IP بعنوان IP الذي حصلت عليه من الخطوة 1
-REDIS_URL = f"redis://{os.environ.get('REDIS_IP', 'localhost')}:6379/0"
+REDIS_IP = os.environ.get('REDIS_IP')
+REDIS_URL = f"redis://{REDIS_IP}:6379/0"
 celery_app = Celery('tasks', broker=REDIS_URL, backend=REDIS_URL)
 
 # --- إعداد Firebase و GCS ---
 if not firebase_admin._apps:
-    # Note: In a real app, get credentials securely (e.g., from Secret Manager)
-    cred = credentials.ApplicationDefault() 
+    firebase_credentials_json = get_secret("firebase-credentials")
+    cred = credentials.Certificate(json.loads(firebase_credentials_json))
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 storage_client = storage.Client()
-BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME') # Set this as an environment variable
+BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
 
 @celery_app.task(bind=True)
 def process_audio_task(self, task_data):
@@ -54,14 +64,12 @@ def process_audio_task(self, task_data):
             output_files = {}
 
             if operation == 'separate':
-                # دعم أكثر من stem
-                stems = options.get('stems', ['vocals']) # Default to vocals
+                stems = options.get('stems', ['vocals'])
                 model_name = "htdemucs"
                 
                 command = ["python3", "-m", "demucs.separate", "-n", model_name, "-o", temp_dir]
                 if len(stems) == 1 and 'vocals' in stems:
-                     command.extend(["--two-stems=vocals"])
-                # Demucs default behavior separates all stems if --two-stems is not specified
+                    command.extend(["--two-stems=vocals"])
                 
                 command.append(local_input_path)
                 
@@ -69,16 +77,15 @@ def process_audio_task(self, task_data):
 
                 output_folder = os.path.join(temp_dir, model_name, os.path.splitext(base_filename)[0])
                 
-                # رفع الملفات الناتجة
                 for stem_file in os.listdir(output_folder):
                     local_path = os.path.join(output_folder, stem_file)
                     gcs_path = f"processed/{user_id}/{task_id}/{stem_file}"
                     blob = bucket.blob(gcs_path)
                     blob.upload_from_filename(local_path)
+                    blob.make_public() # Make file publicly accessible
                     output_files[os.path.splitext(stem_file)[0]] = blob.public_url
 
             elif operation == 'enhance':
-                # نفس منطق التحسين السابق ولكن مع GCS
                 wav_filepath = os.path.join(temp_dir, 'temp_for_enhance.wav')
                 subprocess.run(['ffmpeg', '-i', local_input_path, wav_filepath, '-y'], check=True)
                 rate, data = wavfile.read(wav_filepath)
@@ -91,9 +98,9 @@ def process_audio_task(self, task_data):
                 gcs_path = f"processed/{user_id}/{task_id}/{output_filename}"
                 blob = bucket.blob(gcs_path)
                 blob.upload_from_filename(local_output_path)
+                blob.make_public() # Make file publicly accessible
                 output_files['enhanced'] = blob.public_url
 
-            # تحديث Firestore بالنتائج
             db.collection('tasks').document(task_id).update({
                 'status': 'completed',
                 'results': output_files,
