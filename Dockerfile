@@ -23,7 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # الخطوة 6: نسخ جميع ملفات التطبيق إلى الحاوية
 COPY . .
 
-# الخطوة 7: الأمر النهائي لتشغيل التطبيق
-# سيتم تشغيل الخادم والعامل معًا
-CMD exec celery -A celery_worker.celery_app worker --loglevel=info & exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 0 app:app
-```4.  اضغط `Ctrl + S` لحفظ الملف.
+# الخطوة 7: نسخ وتحضير سكربت بدء التشغيل
+COPY run.sh .
+RUN chmod +x ./run.sh
+
+# الخطوة 8: الأمر النهائي لتشغيل التطبيق عبر السكربت
+CMD ["./run.sh"]
