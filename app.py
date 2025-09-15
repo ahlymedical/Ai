@@ -1,136 +1,119 @@
 import os
-import subprocess
 import logging
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, g
 from werkzeug.utils import secure_filename
-import noisereduce as nr
-from scipy.io import wavfile
-import torch
+from google.cloud import storage
+import firebase_admin
+from firebase_admin import auth, credentials, firestore
+from celery_worker import process_audio_task # استيراد المهمة
+from flask_babel import Babel, gettext as _
 
 # --- الإعدادات الأساسية ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# --- إعدادات المجلدات ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-PROCESSED_FOLDER = os.path.join(BASE_DIR, 'processed')
+# --- إعدادات i18n (متعدد اللغات) ---
+app.config['BABEL_DEFAULT_LOCALE'] = 'ar'
+babel = Babel(app)
+
+@babel.localeselector
+def get_locale():
+    # يمكن التبديل بناءً على طلب المستخدم أو تفضيلات المتصفح
+    return request.accept_languages.best_match(['ar', 'en'])
+
+# --- إعداد Firebase و GCS ---
+if not firebase_admin._apps:
+    # In Cloud Run, it will use the service account's credentials automatically
+    cred = credentials.ApplicationDefault()
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+storage_client = storage.Client()
+BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME') # يجب تعيينه كمتغير بيئة
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'flac', 'm4a'}
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# --- Middleware للمصادقة ---
+@app.before_request
+def verify_user():
+    g.user = None
+    id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
+    if id_token:
+        try:
+            g.user = auth.verify_id_token(id_token)
+        except Exception as e:
+            logging.warning(f"Invalid token: {e}")
+            g.user = None
+
+def require_auth(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if g.user is None:
+            return jsonify({"error": _("Authentication required")}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- الواجهات ---
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/separate', methods=['POST'])
-def separate_audio():
+@app.route('/process', methods=['POST'])
+@require_auth
+def start_processing():
     if 'audio_file' not in request.files:
-        return jsonify({"error": "لم يتم إرسال أي ملف"}), 400
+        return jsonify({"error": _("No file sent")}), 400
     
     file = request.files['audio_file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify({"error": "ملف غير صالح أو لم يتم اختياره"}), 400
-
-    try:
-        filename = secure_filename(file.filename)
-        input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(input_path)
-        logging.info(f"الملف '{filename}' تم حفظه بنجاح.")
-
-        # --- استخدام Demucs لفصل الصوت ---
-        model_name = "htdemucs" # اسم النموذج المستخدم
-        output_dir = app.config['PROCESSED_FOLDER']
-        
-        logging.info(f"بدء عملية الفصل باستخدام Demucs للملف: {input_path}")
-        command = [
-            "python3", "-m", "demucs.separate",
-            "-n", model_name,
-            "-o", str(output_dir),
-            "--two-stems=vocals",
-            str(input_path)
-        ]
-        
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = ""
-
-        process = subprocess.run(command, capture_output=True, text=True, env=env)
-
-        if process.returncode != 0:
-            logging.error(f"فشل Demucs: {process.stderr}")
-            raise Exception("فشلت عملية معالجة الصوت.")
-        
-        logging.info("اكتملت عملية الفصل بنجاح.")
-
-        base_filename = os.path.splitext(filename)[0]
-        result_folder = os.path.join(output_dir, model_name, base_filename)
-        
-        vocals_path = os.path.join(result_folder, 'vocals.wav')
-        accompaniment_path = os.path.join(result_folder, 'no_vocals.wav')
-
-        if not os.path.exists(vocals_path) or not os.path.exists(accompaniment_path):
-            raise Exception("لم يتم العثور على الملفات الناتجة.")
-        
-        return jsonify({
-            "files": {
-                "vocals": f"/processed/{model_name}/{base_filename}/vocals.wav",
-                "accompaniment": f"/processed/{model_name}/{base_filename}/no_vocals.wav"
-            }
-        })
-
-    except Exception as e:
-        logging.error(f"حدث خطأ فادح: {e}")
-        return jsonify({"error": f"حدث خطأ أثناء المعالجة: {str(e)}"}), 500
-
-
-@app.route('/enhance', methods=['POST'])
-def enhance_audio():
-    if 'audio_file' not in request.files:
-        return jsonify({"error": "لم يتم إرسال أي ملف"}), 400
+    operation = request.form.get('operation') # 'separate' or 'enhance'
     
-    file = request.files['audio_file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify({"error": "ملف غير صالح أو لم يتم اختياره"}), 400
+    if not operation or file.filename == '' or not allowed_file(file.filename):
+        return jsonify({"error": _("Invalid file or operation")}), 400
 
     try:
+        user_id = g.user['uid']
         filename = secure_filename(file.filename)
-        input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(input_path)
-        logging.info(f"الملف '{filename}' تم حفظه بنجاح للتحسين.")
         
-        wav_filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_for_enhance.wav')
-        subprocess.run(['ffmpeg', '-i', input_path, wav_filepath, '-y'], check=True)
+        # رفع الملف إلى GCS
+        gcs_path = f"uploads/{user_id}/{filename}"
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(gcs_path)
+        blob.upload_from_file(file)
         
-        rate, data = wavfile.read(wav_filepath)
-        
-        logging.info("بدء عملية إزالة الضوضاء...")
-        reduced_noise_data = nr.reduce_noise(y=data, sr=rate, stationary=True)
-        logging.info("اكتملت إزالة الضوضاء.")
-        
-        output_filename = f"enhanced_{os.path.splitext(filename)[0]}.wav"
-        output_filepath = os.path.join(app.config['PROCESSED_FOLDER'], output_filename)
-        wavfile.write(output_filepath, rate, reduced_noise_data)
-        
-        return jsonify({
-            "files": {"enhanced": f"/processed/{output_filename}"}
+        # خيارات إضافية (مثل الـ stems)
+        options = {}
+        if operation == 'separate':
+            stems = request.form.getlist('stems') # e.g., ['vocals', 'drums']
+            if stems:
+                options['stems'] = stems
+
+        # بدء مهمة Celery
+        task = process_audio_task.delay({
+            'user_id': user_id,
+            'gcs_input_path': gcs_path,
+            'operation': operation,
+            'options': options
         })
         
+        return jsonify({"message": _("Processing started"), "task_id": task.id}), 202
+
     except Exception as e:
-        logging.error(f"حدث خطأ أثناء التحسين: {e}")
-        return jsonify({"error": f"حدث خطأ أثناء المعالجة: {str(e)}"}), 500
+        logging.error(f"Error starting task: {e}")
+        return jsonify({"error": _("Error starting processing")}), 500
 
+@app.route('/task_status/<task_id>', methods=['GET'])
+@require_auth
+def get_task_status(task_id):
+    user_id = g.user['uid']
+    doc_ref = db.collection('tasks').document(task_id)
+    doc = doc_ref.get()
 
-@app.route('/processed/<path:path>')
-def send_processed_file(path):
-    return send_from_directory(app.config['PROCESSED_FOLDER'], path, as_attachment=True)
-
+    if not doc.exists or doc.to_dict().get('userId') != user_id:
+        return jsonify({"error": _("Task not found")}), 404
+        
+    return jsonify(doc.to_dict())
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
