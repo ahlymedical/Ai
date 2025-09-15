@@ -1,16 +1,15 @@
 document.addEventListener('DOMContentLoaded', function () {
     // =================================================================
-    // TODO: أدخل إعدادات Firebase الخاصة بك هنا
-    // اذهب إلى Project Settings > General في Firebase Console
-    // وابحث عن "Firebase SDK snippet" واختر "Config"
+    // تم إدخال إعدادات Firebase الخاصة بك هنا
     // =================================================================
     const firebaseConfig = {
-        apiKey: "YOUR_API_KEY",
-        authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-        projectId: "YOUR_PROJECT_ID",
-        storageBucket: "YOUR_PROJECT_ID.appspot.com",
-        messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-        appId: "YOUR_APP_ID"
+        apiKey: "AIzaSyA7yDHMKVXJFzYxDVYbIIj-MaLyNiISSKE",
+        authDomain: "translation-470421-f18e8.firebaseapp.com",
+        projectId: "translation-470421-f18e8",
+        storageBucket: "translation-470421-f18e8.appspot.com", // Corrected storage bucket URL
+        messagingSenderId: "250174443342",
+        appId: "1:250174443342:web:0ac6deb18084078a3dd81f",
+        measurementId: "G-GMZYXQE6PL"
     };
 
     // Initialize Firebase
@@ -154,7 +153,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 if (data.status === 'completed') {
                     clearInterval(interval);
-
                     showLoader(false);
                     displayResults(resultsId, data.results);
                 } else if (data.status === 'failed') {
@@ -166,4 +164,40 @@ document.addEventListener('DOMContentLoaded', function () {
             } catch (error) {
                 clearInterval(interval);
                 showLoader(false);
-                alert("فشل الاتصال بالخادم لمتابعة ا
+                alert("فشل الاتصال بالخادم لمتابعة الحالة.");
+            }
+        }, 5000); // متابعة كل 5 ثوانٍ
+    }
+
+    function showLoader(show, text = "جاري المعالجة...") {
+        loaderText.textContent = text;
+        loader.classList.toggle('hidden', !show);
+    }
+
+    function displayResults(resultsId, files) {
+        const resultsArea = document.getElementById(resultsId);
+        resultsArea.innerHTML = '<h3>النتائج جاهزة!</h3>';
+
+        for (const key in files) {
+            const trackName = key.charAt(0).toUpperCase() + key.slice(1); // Capitalize
+            const filePath = files[key];
+            
+            const trackElement = document.createElement('div');
+            trackElement.className = 'result-track';
+            trackElement.innerHTML = `
+                <span>${trackName}</span>
+                <a href="${filePath}" class="download-btn" target="_blank" download><i class="fas fa-download"></i> تحميل</a>
+            `;
+            resultsArea.appendChild(trackElement);
+        }
+        resultsArea.classList.remove('hidden');
+    }
+
+    function updateFileName(fileInputId, fileNameId) {
+        const fileInput = document.getElementById(fileInputId);
+        const fileNameDisplay = document.getElementById(fileNameId);
+        fileInput.addEventListener('change', () => {
+            fileNameDisplay.textContent = fileInput.files.length > 0 ? fileInput.files[0].name : '';
+        });
+    }
+});
