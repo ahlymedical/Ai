@@ -2,11 +2,13 @@ import os
 import logging
 from flask import Flask, render_template, request, jsonify, g
 from werkzeug.utils import secure_filename
-from google.cloud import storage
+from google.cloud import storage, secretmanager
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
 from celery_worker import process_audio_task # استيراد المهمة
 from flask_babel import Babel, gettext as _
+from functools import wraps
+import json
 
 # --- الإعدادات الأساسية ---
 logging.basicConfig(level=logging.INFO)
@@ -18,18 +20,32 @@ babel = Babel(app)
 
 @babel.localeselector
 def get_locale():
-    # يمكن التبديل بناءً على طلب المستخدم أو تفضيلات المتصفح
     return request.accept_languages.best_match(['ar', 'en'])
 
 # --- إعداد Firebase و GCS ---
+project_id = os.environ.get('GCP_PROJECT', 'translation-470421') # Fallback for local testing
+
+def get_secret(secret_id, version_id="latest"):
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
+    response = client.access_secret_version(request={"name": name})
+    return response.payload.data.decode("UTF-8")
+
 if not firebase_admin._apps:
-    # In Cloud Run, it will use the service account's credentials automatically
-    cred = credentials.ApplicationDefault()
-    firebase_admin.initialize_app(cred)
+    try:
+        firebase_credentials_json = get_secret("firebase-credentials")
+        cred = credentials.Certificate(json.loads(firebase_credentials_json))
+        firebase_admin.initialize_app(cred)
+    except Exception as e:
+        logging.error(f"Could not initialize Firebase: {e}")
+        # Fallback for local development without secrets
+        # cred = credentials.ApplicationDefault()
+        # firebase_admin.initialize_app(cred)
+
 
 db = firestore.client()
 storage_client = storage.Client()
-BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME') # يجب تعيينه كمتغير بيئة
+BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'audio-processing-bucket-12345') # Fallback
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'flac', 'm4a'}
 
 def allowed_file(filename):
@@ -67,7 +83,7 @@ def start_processing():
         return jsonify({"error": _("No file sent")}), 400
     
     file = request.files['audio_file']
-    operation = request.form.get('operation') # 'separate' or 'enhance'
+    operation = request.form.get('operation')
     
     if not operation or file.filename == '' or not allowed_file(file.filename):
         return jsonify({"error": _("Invalid file or operation")}), 400
@@ -76,26 +92,25 @@ def start_processing():
         user_id = g.user['uid']
         filename = secure_filename(file.filename)
         
-        # رفع الملف إلى GCS
         gcs_path = f"uploads/{user_id}/{filename}"
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(gcs_path)
-        blob.upload_from_file(file)
+        blob.upload_from_file(file.stream)
         
-        # خيارات إضافية (مثل الـ stems)
         options = {}
         if operation == 'separate':
-            stems = request.form.getlist('stems') # e.g., ['vocals', 'drums']
+            stems = request.form.getlist('stems')
             if stems:
                 options['stems'] = stems
 
-        # بدء مهمة Celery
-        task = process_audio_task.delay({
+        task_data = {
             'user_id': user_id,
             'gcs_input_path': gcs_path,
             'operation': operation,
             'options': options
-        })
+        }
+        
+        task = process_audio_task.delay(task_data)
         
         return jsonify({"message": _("Processing started"), "task_id": task.id}), 202
 
@@ -117,4 +132,4 @@ def get_task_status(task_id):
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
