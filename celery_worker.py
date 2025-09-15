@@ -10,10 +10,8 @@ from scipy.io import wavfile
 import tempfile
 import json
 
-# --- الإعدادات الأساسية ---
 logging.basicConfig(level=logging.INFO)
 
-# --- جلب الإعدادات الحساسة ---
 project_id = os.environ.get('GCP_PROJECT')
 
 def get_secret(secret_id, version_id="latest"):
@@ -22,12 +20,10 @@ def get_secret(secret_id, version_id="latest"):
     response = client.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")
 
-# --- إعداد Celery ---
 REDIS_IP = os.environ.get('REDIS_IP')
 REDIS_URL = f"redis://{REDIS_IP}:6379/0"
 celery_app = Celery('tasks', broker=REDIS_URL, backend=REDIS_URL)
 
-# --- إعداد Firebase و GCS ---
 if not firebase_admin._apps:
     firebase_credentials_json = get_secret("firebase-credentials")
     cred = credentials.Certificate(json.loads(firebase_credentials_json))
@@ -82,7 +78,7 @@ def process_audio_task(self, task_data):
                     gcs_path = f"processed/{user_id}/{task_id}/{stem_file}"
                     blob = bucket.blob(gcs_path)
                     blob.upload_from_filename(local_path)
-                    blob.make_public() # Make file publicly accessible
+                    blob.make_public()
                     output_files[os.path.splitext(stem_file)[0]] = blob.public_url
 
             elif operation == 'enhance':
@@ -98,7 +94,7 @@ def process_audio_task(self, task_data):
                 gcs_path = f"processed/{user_id}/{task_id}/{output_filename}"
                 blob = bucket.blob(gcs_path)
                 blob.upload_from_filename(local_output_path)
-                blob.make_public() # Make file publicly accessible
+                blob.make_public()
                 output_files['enhanced'] = blob.public_url
 
             db.collection('tasks').document(task_id).update({
