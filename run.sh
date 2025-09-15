@@ -1,13 +1,15 @@
 #!/bin/bash
+# الخروج فوراً في حال حدوث أي خطأ
+set -e
 
-# Set default port if not provided by Cloud Run
-PORT=${PORT:-8080}
+# هذا السكربت يقوم ببدء تشغيل عامل Celery في الخلفية ثم خادم Gunicorn في المقدمة.
+# Cloud Run يراقب العملية التي تعمل في المقدمة (Foreground).
 
-echo "Starting Celery worker..."
+# 1. بدء تشغيل عامل Celery في الخلفية
+echo "Starting Celery worker in the background..."
 celery -A celery_worker.celery_app worker --loglevel=info &
 
-echo "Waiting for Celery to start..."
-sleep 5
-
-echo "Starting Gunicorn on port $PORT..."
-exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 0 app:app
+# 2. بدء تشغيل خادم الويب Gunicorn في المقدمة
+# سيستمع الخادم للمنفذ (PORT) الذي يحدده Cloud Run تلقائياً.
+echo "Starting Gunicorn web server..."
+exec gunicorn --bind "0.0.0.0:${PORT}" --workers 1 --threads 8 --timeout 0 app:app
