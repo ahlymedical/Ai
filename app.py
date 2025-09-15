@@ -5,16 +5,14 @@ from werkzeug.utils import secure_filename
 from google.cloud import storage, secretmanager
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
-from celery_worker import process_audio_task # استيراد المهمة
+from celery_worker import process_audio_task
 from flask_babel import Babel, gettext as _
 from functools import wraps
 import json
 
-# --- الإعدادات الأساسية ---
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# --- إعدادات i18n (متعدد اللغات) ---
 app.config['BABEL_DEFAULT_LOCALE'] = 'ar'
 babel = Babel(app)
 
@@ -22,8 +20,7 @@ babel = Babel(app)
 def get_locale():
     return request.accept_languages.best_match(['ar', 'en'])
 
-# --- إعداد Firebase و GCS ---
-project_id = os.environ.get('GCP_PROJECT', 'translation-470421') # Fallback for local testing
+project_id = os.environ.get('GCP_PROJECT', 'translation-470421')
 
 def get_secret(secret_id, version_id="latest"):
     client = secretmanager.SecretManagerServiceClient()
@@ -38,20 +35,15 @@ if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     except Exception as e:
         logging.error(f"Could not initialize Firebase: {e}")
-        # Fallback for local development without secrets
-        # cred = credentials.ApplicationDefault()
-        # firebase_admin.initialize_app(cred)
-
 
 db = firestore.client()
 storage_client = storage.Client()
-BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'audio-processing-bucket-12345') # Fallback
+BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'audio-processing-bucket-12345')
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'flac', 'm4a'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- Middleware للمصادقة ---
 @app.before_request
 def verify_user():
     g.user = None
@@ -71,7 +63,6 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# --- الواجهات ---
 @app.route('/')
 def index():
     return render_template('index.html')
